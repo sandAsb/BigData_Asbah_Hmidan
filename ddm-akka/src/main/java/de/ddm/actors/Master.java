@@ -14,71 +14,83 @@ import lombok.NoArgsConstructor;
 
 public class Master extends AbstractBehavior<Master.Message> {
 
-	////////////////////
-	// Actor Messages //
-	////////////////////
+    ////////////////////
+    // Actor Messages //
+    ////////////////////
 
-	public interface Message extends AkkaSerializable {
-	}
+    public interface Message extends AkkaSerializable { }
 
-	@NoArgsConstructor
-	public static class StartMessage implements Message {
-		private static final long serialVersionUID = -1963913294517850454L;
-	}
+    @NoArgsConstructor
+    public static class StartMessage implements Message {
+        private static final long serialVersionUID = -1963913294517850454L;
+    }
 
-	@NoArgsConstructor
-	public static class ShutdownMessage implements Message {
-		private static final long serialVersionUID = 7516129288777469221L;
-	}
+    @NoArgsConstructor
+    public static class ShutdownMessage implements Message {
+        private static final long serialVersionUID = 7516129288777469221L;
+    }
 
-	////////////////////////
-	// Actor Construction //
-	////////////////////////
+    /** Sent by DependencyMiner when the discovery has finished and results were finalized. */
+    @NoArgsConstructor
+    public static class MiningFinishedMessage implements Message {
+        private static final long serialVersionUID = 1L;
+    }
 
-	public static final String DEFAULT_NAME = "master";
+    ////////////////////////
+    // Actor Construction //
+    ////////////////////////
 
-	public static Behavior<Message> create() {
-		return Behaviors.setup(Master::new);
-	}
+    public static final String DEFAULT_NAME = "master";
 
-	private Master(ActorContext<Message> context) {
-		super(context);
-		Reaper.watchWithDefaultReaper(this.getContext().getSelf());
+    public static Behavior<Message> create(ActorRef<Guardian.Message> guardian) {
+        return Behaviors.setup(ctx -> new Master(ctx, guardian));
+    }
 
-		this.dependencyMiner = context.spawn(
-				DependencyMiner.create(),
-				DependencyMiner.DEFAULT_NAME,
-				DispatcherSelector.fromConfig("akka.master-pinned-dispatcher"));
-	}
+    private Master(ActorContext<Message> context, ActorRef<Guardian.Message> guardian) {
+        super(context);
+        Reaper.watchWithDefaultReaper(this.getContext().getSelf());
 
-	/////////////////
-	// Actor State //
-	/////////////////
+        this.guardian = guardian;
 
-	private final ActorRef<DependencyMiner.Message> dependencyMiner;
+        this.dependencyMiner = context.spawn(
+                DependencyMiner.create(this.getContext().getSelf()),
+                DependencyMiner.DEFAULT_NAME,
+                DispatcherSelector.fromConfig("akka.master-pinned-dispatcher"));
+    }
 
-	////////////////////
-	// Actor Behavior //
-	////////////////////
+    ///////////////////
+    // Actor State   //
+    ///////////////////
 
-	@Override
-	public Receive<Message> createReceive() {
-		return newReceiveBuilder()
-				.onMessage(StartMessage.class, this::handle)
-				.onMessage(ShutdownMessage.class, this::handle)
-				.build();
-	}
+    private final ActorRef<Guardian.Message> guardian;
+    private final ActorRef<DependencyMiner.Message> dependencyMiner;
 
-	private Behavior<Message> handle(StartMessage message) {
-		this.dependencyMiner.tell(new DependencyMiner.StartMessage());
-		return this;
-	}
+    //////////////////////
+    // Actor Behavior   //
+    //////////////////////
 
-	private Behavior<Message> handle(ShutdownMessage message) {
-		// If we expect the system to still be active when a ShutdownMessage is issued,
-		// we should propagate this ShutdownMessage to all active child actors so that they
-		// can end their protocols in a clean way. Simply stopping this actor also stops all
-		// child actors, but in a hard way!
-		return Behaviors.stopped();
-	}
+    @Override
+    public Receive<Message> createReceive() {
+        return newReceiveBuilder()
+                .onMessage(StartMessage.class, this::handle)
+                .onMessage(MiningFinishedMessage.class, this::handle)
+                .onMessage(ShutdownMessage.class, this::handle)
+                .build();
+    }
+
+    private Behavior<Message> handle(StartMessage message) {
+        this.dependencyMiner.tell(new DependencyMiner.StartMessage());
+        return this;
+    }
+
+    private Behavior<Message> handle(MiningFinishedMessage message) {
+        // Algorithm completed: trigger cluster shutdown via guardian.
+        this.guardian.tell(new Guardian.ShutdownMessage(this.guardian));
+        return this;
+    }
+
+    private Behavior<Message> handle(ShutdownMessage message) {
+        // Optional: propagate shutdown to children for graceful stop.
+        return Behaviors.stopped();
+    }
 }

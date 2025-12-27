@@ -10,31 +10,30 @@ import java.io.IOException;
 
 public class Main {
 
-	public static void main(String[] args) {
-		Command.applyOn(args);
+    public static void main(String[] args) {
+        Command.applyOn(args);
 
-		SystemConfiguration config = SystemConfigurationSingleton.get();
+        SystemConfiguration config = SystemConfigurationSingleton.get();
 
-		final ActorSystem<Guardian.Message> guardian = ActorSystem.create(Guardian.create(), config.getActorSystemName(), config.toAkkaConfig());
+        final ActorSystem<Guardian.Message> guardian =
+                ActorSystem.create(Guardian.create(), config.getActorSystemName(), config.toAkkaConfig());
 
-		if (config.getRole().equals(SystemConfiguration.MASTER_ROLE)) {
-			if (config.isStartPaused())
-				waitForInput(">>> Press ENTER to start <<<");
+        if (config.getRole().equals(SystemConfiguration.MASTER_ROLE)) {
+            if (config.isStartPaused())
+                waitForInput(">>> Press ENTER to start <<<");
 
-			guardian.tell(new Guardian.StartMessage());
+            guardian.tell(new Guardian.StartMessage());
 
-			if (config.isEnterShutdown()) {
-				waitForInput(">>> Press ENTER to exit <<<");
-				guardian.tell(new Guardian.ShutdownMessage());
-			}
-		}
-	}
+            // IMPORTANT: Do not shutdown on key press. The algorithm must trigger shutdown itself.
+            // Removed demo enterShutdown behavior.
+        }
+    }
 
-	private static void waitForInput(String message) {
-		try {
-			System.out.println(message);
-			System.in.read();
-		} catch (IOException ignored) {
-		}
-	}
+    private static void waitForInput(String message) {
+        try {
+            System.out.println(message);
+            System.in.read();
+        } catch (IOException ignored) {
+        }
+    }
 }

@@ -22,91 +22,91 @@ import java.util.List;
 
 public class InputReader extends AbstractBehavior<InputReader.Message> {
 
-	////////////////////
-	// Actor Messages //
-	////////////////////
+    ////////////////////
+    // Actor Messages //
+    ////////////////////
 
-	public interface Message extends AkkaSerializable {
-	}
+    public interface Message extends AkkaSerializable { }
 
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class ReadHeaderMessage implements Message {
-		private static final long serialVersionUID = 1729062814525657711L;
-		ActorRef<DependencyMiner.Message> replyTo;
-	}
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ReadHeaderMessage implements Message {
+        private static final long serialVersionUID = 1729062814525657711L;
+        ActorRef<DependencyMiner.Message> replyTo;
+    }
 
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class ReadBatchMessage implements Message {
-		private static final long serialVersionUID = -7915854043207237318L;
-		ActorRef<DependencyMiner.Message> replyTo;
-		int batchSize;
-	}
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ReadBatchMessage implements Message {
+        private static final long serialVersionUID = -7915854043207237318L;
+        ActorRef<DependencyMiner.Message> replyTo;
+        int batchSize;
+    }
 
-	////////////////////////
-	// Actor Construction //
-	////////////////////////
+    ////////////////////////
+    // Actor Construction //
+    ////////////////////////
 
-	public static final String DEFAULT_NAME = "inputReader";
+    public static final String DEFAULT_NAME = "inputReader";
 
-	public static Behavior<Message> create(final int id, final File inputFile) {
-		return Behaviors.setup(context -> new InputReader(context, id, inputFile));
-	}
+    public static Behavior<Message> create(final int id, final File inputFile) {
+        return Behaviors.setup(context -> new InputReader(context, id, inputFile));
+    }
 
-	private InputReader(ActorContext<Message> context, final int id, final File inputFile) throws IOException, CsvValidationException {
-		super(context);
-		this.id = id;
-		this.reader = InputConfigurationSingleton.get().createCSVReader(inputFile);
-		this.header = InputConfigurationSingleton.get().getHeader(inputFile);
-		
-		if (InputConfigurationSingleton.get().isFileHasHeader())
-			this.reader.readNext();
-	}
+    private InputReader(ActorContext<Message> context, final int id, final File inputFile)
+            throws IOException, CsvValidationException {
+        super(context);
+        this.id = id;
+        this.reader = InputConfigurationSingleton.get().createCSVReader(inputFile);
+        this.header = InputConfigurationSingleton.get().getHeader(inputFile);
 
-	/////////////////
-	// Actor State //
-	/////////////////
+        if (InputConfigurationSingleton.get().isFileHasHeader())
+            this.reader.readNext();
+    }
 
-	private final int id;
-	private final CSVReader reader;
-	private final String[] header;
+    /////////////////
+    // Actor State //
+    /////////////////
 
-	////////////////////
-	// Actor Behavior //
-	////////////////////
+    private final int id;
+    private final CSVReader reader;
+    private final String[] header;
 
-	@Override
-	public Receive<Message> createReceive() {
-		return newReceiveBuilder()
-				.onMessage(ReadHeaderMessage.class, this::handle)
-				.onMessage(ReadBatchMessage.class, this::handle)
-				.onSignal(PostStop.class, this::handle)
-				.build();
-	}
+    ////////////////////
+    // Actor Behavior //
+    ////////////////////
 
-	private Behavior<Message> handle(ReadHeaderMessage message) {
-		message.getReplyTo().tell(new DependencyMiner.HeaderMessage(this.id, this.header));
-		return this;
-	}
+    @Override
+    public Receive<Message> createReceive() {
+        return newReceiveBuilder()
+                .onMessage(ReadHeaderMessage.class, this::handle)
+                .onMessage(ReadBatchMessage.class, this::handle)
+                .onSignal(PostStop.class, this::handle)
+                .build();
+    }
 
-	private Behavior<Message> handle(ReadBatchMessage message) throws IOException, CsvValidationException {
-		List<String[]> batch = new ArrayList<>(message.getBatchSize());
-		for (int i = 0; i < message.getBatchSize(); i++) {
-			String[] line = this.reader.readNext();
-			if (line == null)
-				break;
-			batch.add(line);
-		}
+    private Behavior<Message> handle(ReadHeaderMessage message) {
+        message.getReplyTo().tell(new DependencyMiner.HeaderMessage(this.id, this.header));
+        return this;
+    }
 
-		message.getReplyTo().tell(new DependencyMiner.BatchMessage(this.id, batch));
-		return this;
-	}
+    private Behavior<Message> handle(ReadBatchMessage message) throws IOException, CsvValidationException {
+        List<String[]> batch = new ArrayList<>(message.getBatchSize());
+        for (int i = 0; i < message.getBatchSize(); i++) {
+            String[] line = this.reader.readNext();
+            if (line == null)
+                break;
+            batch.add(line);
+        }
 
-	private Behavior<Message> handle(PostStop signal) throws IOException {
-		this.reader.close();
-		return this;
-	}
+        message.getReplyTo().tell(new DependencyMiner.BatchMessage(this.id, batch));
+        return this;
+    }
+
+    private Behavior<Message> handle(PostStop signal) throws IOException {
+        this.reader.close();
+        return this;
+    }
 }
