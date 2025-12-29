@@ -9,6 +9,9 @@
         <module name="ddm-akka" />
       </profile>
     </annotationProcessing>
+    <bytecodeTargetLevel>
+      <module name="ddm-akka" target="19" />
+    </bytecodeTargetLevel>
   </component>
   <component name="JavacSettings">
     <option name="ADDITIONAL_OPTIONS_OVERRIDE">

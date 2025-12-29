@@ -78,14 +78,18 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
     // Actor Behavior //
     ////////////////////
 
+    public static class ShutdownMessage implements Message { }
+
     @Override
     public Receive<Message> createReceive() {
         return newReceiveBuilder()
                 .onMessage(ReadHeaderMessage.class, this::handle)
                 .onMessage(ReadBatchMessage.class, this::handle)
+                .onMessage(ShutdownMessage.class, msg -> Behaviors.stopped())
                 .onSignal(PostStop.class, this::handle)
                 .build();
     }
+
 
     private Behavior<Message> handle(ReadHeaderMessage message) {
         message.getReplyTo().tell(new DependencyMiner.HeaderMessage(this.id, this.header));
@@ -109,4 +113,5 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
         this.reader.close();
         return this;
     }
+
 }

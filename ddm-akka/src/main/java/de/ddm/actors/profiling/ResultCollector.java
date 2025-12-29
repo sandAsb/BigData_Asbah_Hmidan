@@ -25,6 +25,8 @@ public class ResultCollector extends AbstractBehavior<ResultCollector.Message> {
 	////////////////////
 	// Actor Messages //
 	////////////////////
+	@NoArgsConstructor
+	public static class ShutdownMessage implements Message { }
 
 	public interface Message extends AkkaSerializable {
 	}
@@ -79,9 +81,11 @@ public class ResultCollector extends AbstractBehavior<ResultCollector.Message> {
 		return newReceiveBuilder()
 				.onMessage(ResultMessage.class, this::handle)
 				.onMessage(FinalizeMessage.class, this::handle)
+				.onMessage(ShutdownMessage.class, msg -> Behaviors.stopped())
 				.onSignal(PostStop.class, this::handle)
 				.build();
 	}
+
 
 	private Behavior<Message> handle(ResultMessage message) throws IOException {
 //		this.getContext().getLog().info("Received {} INDs!", message.getInclusionDependencies().size());

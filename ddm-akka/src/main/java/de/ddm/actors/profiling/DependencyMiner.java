@@ -67,6 +67,9 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
         private static final long serialVersionUID = -4025238529984914107L;
         ActorRef<DependencyWorker.Message> dependencyWorker;
     }
+    @NoArgsConstructor
+    public static class ShutdownMessage implements Message { }
+
 
     /////////////////////////////
     // Helper: Column identity //
@@ -187,6 +190,7 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
                 .onMessage(HeaderMessage.class, this::handle)
                 .onMessage(BatchMessage.class, this::handle)
                 .onMessage(RegistrationMessage.class, this::handle)
+                .onMessage(ShutdownMessage.class, this::handle)   // 👈 add this
                 .onSignal(Terminated.class, this::handle)
                 .build();
     }
@@ -289,6 +293,24 @@ public class DependencyMiner extends AbstractBehavior<DependencyMiner.Message> {
         ActorRef<DependencyWorker.Message> dependencyWorker = signal.getRef().unsafeUpcast();
         this.dependencyWorkers.remove(dependencyWorker);
         return this;
+    }
+
+    private Behavior<Message> handle(ShutdownMessage message) {
+
+        // Forward shutdown to workers
+        for (ActorRef<DependencyWorker.Message> worker : dependencyWorkers) {
+            worker.tell(new DependencyWorker.ShutdownMessage());
+        }
+
+        // Forward shutdown to input readers
+        for (ActorRef<InputReader.Message> reader : inputReaders) {
+            reader.tell(new InputReader.ShutdownMessage());
+        }
+
+        // Forward shutdown to result collector
+        resultCollector.tell(new ResultCollector.ShutdownMessage());
+
+        return Behaviors.stopped();
     }
 
     /////////////////////////////

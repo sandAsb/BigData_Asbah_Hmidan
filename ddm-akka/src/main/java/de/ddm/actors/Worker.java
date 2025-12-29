@@ -3,10 +3,7 @@ package de.ddm.actors;
 import akka.actor.typed.ActorRef;
 import akka.actor.typed.Behavior;
 import akka.actor.typed.DispatcherSelector;
-import akka.actor.typed.javadsl.AbstractBehavior;
-import akka.actor.typed.javadsl.ActorContext;
-import akka.actor.typed.javadsl.Behaviors;
-import akka.actor.typed.javadsl.Receive;
+import akka.actor.typed.javadsl.*;
 import de.ddm.actors.patterns.Reaper;
 import de.ddm.actors.profiling.DependencyWorker;
 import de.ddm.serialization.AkkaSerializable;
@@ -21,9 +18,7 @@ public class Worker extends AbstractBehavior<Worker.Message> {
 	////////////////////
 	// Actor Messages //
 	////////////////////
-
-	public interface Message extends AkkaSerializable {
-	}
+	public interface Message extends AkkaSerializable { }
 
 	@NoArgsConstructor
 	public static class ShutdownMessage implements Message {
@@ -42,28 +37,28 @@ public class Worker extends AbstractBehavior<Worker.Message> {
 
 	private Worker(ActorContext<Message> context) {
 		super(context);
-		Reaper.watchWithDefaultReaper(this.getContext().getSelf());
 
-		final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
+		Reaper.watchWithDefaultReaper(context.getSelf());
 
+		int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
 		this.workers = new ArrayList<>(numWorkers);
-		for (int id = 0; id < numWorkers; id++)
-			this.workers.add(context.spawn(
+
+		for (int i = 0; i < numWorkers; i++)
+			workers.add(context.spawn(
 					DependencyWorker.create(),
-					DependencyWorker.DEFAULT_NAME + "_" + id,
+					DependencyWorker.DEFAULT_NAME + "_" + i,
 					DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
 	}
 
-	/////////////////
+	///////////////////
 	// Actor State //
-	/////////////////
+	///////////////////
 
-	final List<ActorRef<DependencyWorker.Message>> workers;
+	private final List<ActorRef<DependencyWorker.Message>> workers; // more than one
 
-	////////////////////
+	//////////////////////
 	// Actor Behavior //
-	////////////////////
-
+	//////////////////////
 	@Override
 	public Receive<Message> createReceive() {
 		return newReceiveBuilder()
@@ -71,11 +66,10 @@ public class Worker extends AbstractBehavior<Worker.Message> {
 				.build();
 	}
 
-	private Behavior<Message> handle(ShutdownMessage message) {
-		// If we expect the system to still be active when the a ShutdownMessage is issued,
-		// we should propagate this ShutdownMessage to all active child actors so that they
-		// can end their protocols in a clean way. Simply stopping this actor also stops all
-		// child actors, but in a hard way!
-		return Behaviors.stopped();
+	private Behavior<Message> handle(ShutdownMessage msg) {
+		for (ActorRef<DependencyWorker.Message> w : workers)
+			w.tell(new DependencyWorker.ShutdownMessage());
+
+		return this; // Reaper handles termination
 	}
 }

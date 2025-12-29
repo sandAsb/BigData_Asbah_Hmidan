@@ -3,20 +3,13 @@ package de.ddm.actors;
 import akka.actor.typed.ActorRef;
 import akka.actor.typed.Behavior;
 import akka.actor.typed.DispatcherSelector;
-import akka.actor.typed.javadsl.AbstractBehavior;
-import akka.actor.typed.javadsl.ActorContext;
-import akka.actor.typed.javadsl.Behaviors;
-import akka.actor.typed.javadsl.Receive;
+import akka.actor.typed.javadsl.*;
 import de.ddm.actors.patterns.Reaper;
 import de.ddm.actors.profiling.DependencyMiner;
 import de.ddm.serialization.AkkaSerializable;
 import lombok.NoArgsConstructor;
 
 public class Master extends AbstractBehavior<Master.Message> {
-
-    ////////////////////
-    // Actor Messages //
-    ////////////////////
 
     public interface Message extends AkkaSerializable { }
 
@@ -30,15 +23,10 @@ public class Master extends AbstractBehavior<Master.Message> {
         private static final long serialVersionUID = 7516129288777469221L;
     }
 
-    /** Sent by DependencyMiner when the discovery has finished and results were finalized. */
     @NoArgsConstructor
     public static class MiningFinishedMessage implements Message {
         private static final long serialVersionUID = 1L;
     }
-
-    ////////////////////////
-    // Actor Construction //
-    ////////////////////////
 
     public static final String DEFAULT_NAME = "master";
 
@@ -46,28 +34,29 @@ public class Master extends AbstractBehavior<Master.Message> {
         return Behaviors.setup(ctx -> new Master(ctx, guardian));
     }
 
+    private final ActorRef<Guardian.Message> guardian;
+
+    /////////////////
+    // Actor State //
+    /////////////////
+
+    private final ActorRef<DependencyMiner.Message> dependencyMiner;
+
+    ////////////////////
+    // Actor Behavior //
+    ////////////////////
+
     private Master(ActorContext<Message> context, ActorRef<Guardian.Message> guardian) {
         super(context);
-        Reaper.watchWithDefaultReaper(this.getContext().getSelf());
+
+        Reaper.watchWithDefaultReaper(context.getSelf());
 
         this.guardian = guardian;
-
         this.dependencyMiner = context.spawn(
-                DependencyMiner.create(this.getContext().getSelf()),
+                DependencyMiner.create(context.getSelf()),
                 DependencyMiner.DEFAULT_NAME,
                 DispatcherSelector.fromConfig("akka.master-pinned-dispatcher"));
     }
-
-    ///////////////////
-    // Actor State   //
-    ///////////////////
-
-    private final ActorRef<Guardian.Message> guardian;
-    private final ActorRef<DependencyMiner.Message> dependencyMiner;
-
-    //////////////////////
-    // Actor Behavior   //
-    //////////////////////
 
     @Override
     public Receive<Message> createReceive() {
@@ -78,19 +67,18 @@ public class Master extends AbstractBehavior<Master.Message> {
                 .build();
     }
 
-    private Behavior<Message> handle(StartMessage message) {
-        this.dependencyMiner.tell(new DependencyMiner.StartMessage());
+    private Behavior<Message> handle(StartMessage msg) {
+        dependencyMiner.tell(new DependencyMiner.StartMessage());
         return this;
     }
 
-    private Behavior<Message> handle(MiningFinishedMessage message) {
-        // Algorithm completed: trigger cluster shutdown via guardian.
-        this.guardian.tell(new Guardian.ShutdownMessage(this.guardian));
+    private Behavior<Message> handle(MiningFinishedMessage msg) {
+        guardian.tell(new Guardian.ShutdownMessage(guardian));
         return this;
     }
 
-    private Behavior<Message> handle(ShutdownMessage message) {
-        // Optional: propagate shutdown to children for graceful stop.
-        return Behaviors.stopped();
+    private Behavior<Message> handle(ShutdownMessage msg) {
+        dependencyMiner.tell(new DependencyMiner.ShutdownMessage());
+        return this; // Reaper will stop us
     }
 }

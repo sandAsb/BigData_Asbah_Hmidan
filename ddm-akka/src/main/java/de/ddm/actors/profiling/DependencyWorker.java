@@ -36,6 +36,9 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
         int task; // currently unused
     }
 
+    @NoArgsConstructor
+    public static class ShutdownMessage implements Message { }
+
     public static final String DEFAULT_NAME = "dependencyWorker";
 
     public static Behavior<Message> create() {
@@ -65,6 +68,7 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
         return newReceiveBuilder()
                 .onMessage(ReceptionistListingMessage.class, this::handle)
                 .onMessage(TaskMessage.class, this::handle)
+                .onMessage(ShutdownMessage.class, msg -> Behaviors.stopped())
                 .build();
     }
 
@@ -82,4 +86,5 @@ public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message>
         // Currently unused; included for future distributed IND checking.
         return this;
     }
+
 }

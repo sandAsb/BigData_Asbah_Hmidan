@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/BigData_Asbah_Hmidan.iml" filepath="$PROJECT_DIR$/.idea/BigData_Asbah_Hmidan.iml" />
+      <module fileurl="file://$PROJECT_DIR$/ddm-akka/ddm-akka.iml" filepath="$PROJECT_DIR$/ddm-akka/ddm-akka.iml" />
     </modules>
   </component>
 </project>
