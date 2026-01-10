@@ -1,407 +1,190 @@
 package de.ddm.actors.profiling;
 
-import akka.actor.typed.ActorRef;
-import akka.actor.typed.Behavior;
-import akka.actor.typed.DispatcherSelector;
-import akka.actor.typed.javadsl.AbstractBehavior;
-import akka.actor.typed.javadsl.ActorContext;
-import akka.actor.typed.javadsl.Behaviors;
-import akka.actor.typed.javadsl.Receive;
+import akka.actor.typed.*;
+import akka.actor.typed.javadsl.*;
 import akka.actor.typed.receptionist.Receptionist;
 import de.ddm.actors.patterns.LargeMessageProxy;
 import de.ddm.serialization.AkkaSerializable;
-import de.ddm.singletons.SystemConfigurationSingleton;
-import de.ddm.utils.MemoryUtils;
-import it.unimi.dsi.fastutil.ints.*;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.NoArgsConstructor;
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+import lombok.*;
 
 import java.util.*;
 
+/**
+ * Pull-based global validator:
+ * - Worker does NOT own attributes
+ * - Worker pulls tasks from miner (RequestWork)
+ * - For each task (lhs,rhs), worker fetches columns from authoritative owners and validates lhs ⊆ rhs
+ */
 public class DependencyWorker extends AbstractBehavior<DependencyWorker.Message> {
-
-    ////////////////////
-    // Actor Messages //
-    ////////////////////
-
-    public interface Message extends AkkaSerializable, LargeMessageProxy.LargeMessage {
-    }
-
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class ReceptionistListingMessage implements Message {
-        private static final long serialVersionUID = -5246338806092216222L;
-        Receptionist.Listing listing;
-    }
-
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class InitialAttributesMessage implements Message {
-        private static final long serialVersionUID = -7816276125448176767L;
-        int[] attributes;
-        int workerId;
-    }
-
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class DataMessage implements Message {
-        private static final long serialVersionUID = 8586787707165511461L;
-        int attribute;
-        String[] column;
-        int messagesToAccept;
-    }
-
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class MoveDataMessage implements Message {
-        private static final long serialVersionUID = -1382228729107690967L;
-        int[] attributes;
-        ActorRef<DependencyWorker.Message> toWorker;
-        int toWorkerId;
-        ActorRef<LargeMessageProxy.Message> toWorkerLMP;
-        int moveMessages;
-    }
-
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class AcceptDataMessage implements Message {
-        private static final long serialVersionUID = -7984837187618402770L;
-        Map<Integer, Set<String>> columns;
-        int messagesToAccept;
-        int workerId;
-    }
-
-    @Getter
-    @NoArgsConstructor
-    public static class ValidateLocalCandidatesMessage implements Message {
-        private static final long serialVersionUID = -2765506199949499328L;
-    }
-
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class ShareForValidationMessage implements Message {
-        private static final long serialVersionUID = -1228839983943869503L;
-        int attribute;
-        int[] untestedAttributes;
-        ActorRef<DependencyWorker.Message> toWorker;
-        int toWorkerId;
-        ActorRef<LargeMessageProxy.Message> toWorkerLMP;
-    }
-
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class ValidateCandidatesMessage implements Message {
-        private static final long serialVersionUID = -524894512354313788L;
-        int attribute;
-        List<String> column;
-        int[] untestedAttributes;
-        int workerId;
-    }
-    @NoArgsConstructor
-    public static class ShutdownMessage implements Message {
-        private static final long serialVersionUID = 1L;
-    }
-
-    ////////////////////////
-    // Actor Construction //
-    ////////////////////////
 
     public static final String DEFAULT_NAME = "dependencyWorker";
 
-    public static Behavior<Message> create() {
+    public interface Message extends AkkaSerializable, LargeMessageProxy.LargeMessage {}
+
+    // ---- lifecycle ----
+    @NoArgsConstructor public static class ShutdownMessage implements Message {}
+
+    // Miner receptionist
+    @Getter @AllArgsConstructor @NoArgsConstructor
+    public static class MinerListingMessage implements Message {
+        Receptionist.Listing listing;
+    }
+
+    // Miner -> Worker
+    @NoArgsConstructor public static class StartValidationMessage implements Message {}
+    @NoArgsConstructor public static class NoWorkMessage implements Message {}
+
+    @Getter @AllArgsConstructor @NoArgsConstructor
+    public static class ValidatePairMessage implements Message {
+        int lhs;
+        int rhs;
+    }
+
+    // Miner -> Worker owner reply
+    @Getter @AllArgsConstructor @NoArgsConstructor
+    public static class OwnerReplyMessage implements Message {
+        int attribute;
+        ActorRef<DataProvider.Message> owner;
+    }
+
+    // Provider -> Worker column reply (adapter)
+    @Getter @AllArgsConstructor @NoArgsConstructor
+    public static class ColumnMessage implements Message {
+        int attribute;
+        String[] column;
+    }
+
+    public static Behavior<Message> create(ActorRef<DataProvider.Message> provider) {
         return Behaviors.setup(DependencyWorker::new);
     }
 
-    private DependencyWorker(ActorContext<Message> context) {
-        super(context);
+    private ActorRef<DependencyMiner.Message> miner;
 
-        final ActorRef<Receptionist.Listing> listingResponseAdapter =
-                context.messageAdapter(Receptionist.Listing.class, ReceptionistListingMessage::new);
-        context.getSystem().receptionist()
-                .tell(Receptionist.subscribe(DependencyMiner.dependencyMinerService, listingResponseAdapter));
+    // per-task state
+    private int curLhs = -1;
+    private int curRhs = -1;
+    private ActorRef<DataProvider.Message> lhsOwner;
+    private ActorRef<DataProvider.Message> rhsOwner;
+    private String[] lhsColumn;
+    private String[] rhsColumn;
 
-        this.largeMessageProxy =
-                this.getContext().spawn(
-                        LargeMessageProxy.create(this.getContext().getSelf().unsafeUpcast(), false),
-                        LargeMessageProxy.DEFAULT_NAME);
+    private final ActorRef<DataProvider.ResponsePartition> providerColumnAdapter;
 
-        // We will use 40% of the available free memory for storing column data
-        this.availableMemory =
-                (long) (0.4 * (Math.max(MemoryUtils.bytesMax(), MemoryUtils.bytesCommitted()) - MemoryUtils.bytesUsed()));
+    private DependencyWorker(ActorContext<Message> ctx) {
+        super(ctx);
+
+        // Subscribe to miner
+        ActorRef<Receptionist.Listing> listingAdapter =
+                ctx.messageAdapter(Receptionist.Listing.class, MinerListingMessage::new);
+
+        ctx.getSystem().receptionist().tell(
+                Receptionist.subscribe(DependencyMiner.dependencyMinerService, listingAdapter)
+        );
+
+        // Provider column adapter
+        this.providerColumnAdapter =
+                ctx.messageAdapter(DataProvider.ResponsePartition.class,
+                        r -> new ColumnMessage(r.attribute, r.column));
     }
-
-    /////////////////
-    // Actor State //
-    /////////////////
-
-    private final ActorRef<LargeMessageProxy.Message> largeMessageProxy;
-    private List<ActorRef<DependencyWorkerHelper.Message>> dependencyWorkerHelpers;
-
-    private ActorRef<DependencyMiner.Message> dependencyMiner;
-    private int workerId = -1;
-
-    private final long availableMemory;
-    private long usedMemoryMeasured;
-    private long usedMemoryPredicted;
-
-    private Int2ObjectMap<Set<String>> columns = new Int2ObjectArrayMap<>();
-    private Int2ObjectMap<List<String>> sortedColumns;
-    private long valueCount;
-    private double avgValueSize;
-    private final static long valueCountWithoutMemoryMeasurement = 100000;
-
-    private int acceptMessageCounter = 0;
-
-    ////////////////////
-    // Actor Behavior //
-    ////////////////////
 
     @Override
     public Receive<Message> createReceive() {
         return newReceiveBuilder()
-                .onMessage(ReceptionistListingMessage.class, this::handle)
-                .onMessage(InitialAttributesMessage.class, this::handle)
-                .onMessage(DataMessage.class, this::handle)
-                .onMessage(MoveDataMessage.class, this::handle)
-                .onMessage(AcceptDataMessage.class, this::handle)
-                .onMessage(ValidateLocalCandidatesMessage.class, this::handle)
-                .onMessage(ShareForValidationMessage.class, this::handle)
-                .onMessage(ValidateCandidatesMessage.class, this::handle)
-                .onMessage(ShutdownMessage.class, this::handle)
+                .onMessage(MinerListingMessage.class, this::onMinerListing)
+                .onMessage(StartValidationMessage.class, this::onStartValidation)
+                .onMessage(ValidatePairMessage.class, this::onValidatePair)
+                .onMessage(OwnerReplyMessage.class, this::onOwnerReply)
+                .onMessage(ColumnMessage.class, this::onColumn)
+                .onMessage(NoWorkMessage.class, this::onNoWork)
+                .onMessage(ShutdownMessage.class, msg -> Behaviors.stopped())
                 .build();
     }
 
-    private Behavior<Message> handle(ReceptionistListingMessage message) {
-        if (this.dependencyMiner != null)
-            return this;
+    private Behavior<Message> onMinerListing(MinerListingMessage msg) {
+        Set<ActorRef<DependencyMiner.Message>> miners =
+                msg.listing.getServiceInstances(DependencyMiner.dependencyMinerService);
 
-        Set<ActorRef<DependencyMiner.Message>> dependencyMiners =
-                message.getListing().getServiceInstances(DependencyMiner.dependencyMinerService);
-        if (!dependencyMiners.isEmpty() && (this.dependencyMiner == null)) {
-            this.dependencyMiner = dependencyMiners.iterator().next();
-            this.dependencyMiner.tell(
-                    new DependencyMiner.RegistrationMessage(this.getContext().getSelf(), this.largeMessageProxy));
-        }
-        return this;
-    }
-    private void reportStatus() {
-        // Calculate memory exhaustion
-        boolean overloaded = this.availableMemory < this.usedMemoryPredicted;
-
-        // Answer with status
-        this.dependencyMiner.tell(new DependencyMiner.StatusMessage(this.workerId, false, overloaded));
-
-        this.getContext().getLog().info("Status: overloaded = {} ({} / {})", overloaded, this.availableMemory / 1024 / 1024, this.usedMemoryPredicted / 1024 / 1024);
-    }
-
-    private Behavior<Message> handle(InitialAttributesMessage message) {
-        // Initialize this worker's ID
-        this.workerId = message.getWorkerId();
-
-        // Initialize the column sets of attributes that this worker is responsible for
-        for (int attribute : message.getAttributes())
-            this.columns.put(attribute, new HashSet<>());
-
-        this.reportStatus();
-        return this;
-    }
-
-    private Behavior<Message> handle(DataMessage message) {
-        // Store data and update value counts
-        Set<String> localColumn = this.columns.get(message.getAttribute());
-        long columnValueCountBefore = localColumn.size();
-        localColumn.addAll(Arrays.asList(message.getColumn()));
-        long columnValueCountAfter = localColumn.size();
-        this.valueCount = this.valueCount - columnValueCountBefore + columnValueCountAfter;
-
-        // Update memory usage
-        this.updateMemoryUsage();
-
-        // Update acceptMessageCounter and test if this was the last message to be accepted, i.e., the batch has arrived
-        this.acceptMessageCounter++;
-        if (this.acceptMessageCounter == message.getMessagesToAccept()) {
-            this.acceptMessageCounter = 0;
-
-            this.reportStatus();
+        if (!miners.isEmpty() && this.miner == null) {
+            this.miner = miners.iterator().next();
+            this.miner.tell(new DependencyMiner.RegistrationMessage(getContext().getSelf(), null));
         }
         return this;
     }
 
-    private void updateMemoryUsage() {
-        // Skip any memory measurement if the value count is and always was small
-        if ((this.valueCount < valueCountWithoutMemoryMeasurement) && (this.usedMemoryMeasured == 0))
-            return;
-
-        // Measure memory consumption if the memory was never measured before
-        if (this.usedMemoryMeasured == 0) {
-            this.usedMemoryMeasured = MemoryUtils.byteSizeOf(this.columns);
-            this.usedMemoryPredicted = this.usedMemoryMeasured;
-            this.avgValueSize = (double) this.usedMemoryMeasured / (double) this.valueCount;
-            return;
-        }
-
-        // Predict the memory consumption
-        this.usedMemoryPredicted = (long) Math.ceil(this.valueCount * this.avgValueSize);
-        return;
-    }
-
-    private Behavior<Message> handle(MoveDataMessage message) {
-        // Extract local columns that should be shared
-        Map<Integer, Set<String>> stolenColumns = new HashMap<>();
-        for (int attribute : message.getAttributes()) {
-            Set<String> stolenColumn = this.columns.remove(attribute);
-            stolenColumns.put(attribute, stolenColumn);
-            this.valueCount = this.valueCount - stolenColumn.size();
-        }
-
-        // Update memory usage
-        this.updateMemoryUsage();
-
-        // Send columns to target worker
-        LargeMessageProxy.LargeMessage acceptDataMessage = new AcceptDataMessage(stolenColumns, message.getMoveMessages(), message.getToWorkerId());
-        this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(acceptDataMessage, message.getToWorkerLMP()));
-
-        this.reportStatus();
+    private Behavior<Message> onStartValidation(StartValidationMessage msg) {
+        if (miner == null) return this;
+        miner.tell(new DependencyMiner.RequestWorkMessage(getContext().getSelf()));
         return this;
     }
 
-    private Behavior<Message> handle(AcceptDataMessage message) {
-        // Initialize this worker's ID
-        this.workerId = message.getWorkerId();
+    private Behavior<Message> onValidatePair(ValidatePairMessage msg) {
+        this.curLhs = msg.lhs;
+        this.curRhs = msg.rhs;
 
-        // Accept the columns
-        for (Map.Entry<Integer, Set<String>> entry : message.getColumns().entrySet()) {
-            this.columns.put(entry.getKey().intValue(), entry.getValue());
-            this.valueCount = this.valueCount - entry.getValue().size();
-        }
+        // reset per-task state
+        this.lhsOwner = null;
+        this.rhsOwner = null;
+        this.lhsColumn = null;
+        this.rhsColumn = null;
 
-        // Update memory usage
-        this.updateMemoryUsage();
+        // ask miner for authoritative owners
+        miner.tell(new DependencyMiner.GetOwnerMessage(curLhs, getContext().getSelf()));
+        miner.tell(new DependencyMiner.GetOwnerMessage(curRhs, getContext().getSelf()));
+        return this;
+    }
 
-        // Update acceptMessageCounter and test if this was the last message to be accepted, i.e., the stealing is done
-        this.acceptMessageCounter++;
-        if (this.acceptMessageCounter == message.getMessagesToAccept()) {
-            this.acceptMessageCounter = 0;
+    private Behavior<Message> onOwnerReply(OwnerReplyMessage msg) {
+        if (msg.attribute == curLhs) lhsOwner = msg.owner;
+        if (msg.attribute == curRhs) rhsOwner = msg.owner;
 
-            this.reportStatus();
+        // once both owners known, request columns
+        if (lhsOwner != null && rhsOwner != null) {
+            lhsOwner.tell(new DataProvider.RequestPartition(curLhs, providerColumnAdapter));
+            rhsOwner.tell(new DataProvider.RequestPartition(curRhs, providerColumnAdapter));
         }
         return this;
     }
 
-    private void initializeValidation() {
-        // Return if validation has already been initiated
-        if (this.sortedColumns != null)
-            return;
+    private Behavior<Message> onColumn(ColumnMessage msg) {
+        if (msg.attribute == curLhs) lhsColumn = msg.column;
+        if (msg.attribute == curRhs) rhsColumn = msg.column;
 
-        // Sort all columns for more effective IND candidate validation
-        this.sortColumns();
+        if (lhsColumn != null && rhsColumn != null) {
+            boolean ok = isSubsetDistinct(lhsColumn, rhsColumn);
 
-        // Spawn helper actors to perform the actual candidate validations
-        this.spawnHelperActors();
-    }
+            miner.tell(new DependencyMiner.ValidationResultMessage(curLhs, curRhs, ok));
 
-    private void sortColumns() {
-        this.sortedColumns = new Int2ObjectArrayMap<>(this.columns.size());
-        IntList attributes = new IntArrayList(this.columns.keySet());
-        for (int attribute : attributes) {
-            Set<String> column = this.columns.remove(attribute);
-            List<String> sortedColumn = new ArrayList<>(column);
-            Collections.sort(sortedColumn);
-            this.sortedColumns.put(attribute, sortedColumn);
+            // pull next task
+            miner.tell(new DependencyMiner.RequestWorkMessage(getContext().getSelf()));
         }
-        this.columns = null;
-    }
-
-    private void spawnHelperActors() {
-        final int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
-
-        // Spawn a cameo actor for the helpers to externalize the combination of the results for miner
-        ActorRef<DependencyWorkerCameo.Message> cameo = this.getContext().spawn(
-                DependencyWorkerCameo.create(this.dependencyMiner, numWorkers, this.workerId),
-                DependencyWorkerCameo.DEFAULT_NAME,
-                DispatcherSelector.fromConfig("akka.worker-pool-dispatcher"));
-
-        // Spawn the helper actors
-        this.dependencyWorkerHelpers = new ArrayList<>(numWorkers);
-        for (int id = 0; id < numWorkers; id++)
-            this.dependencyWorkerHelpers.add(this.getContext().spawn(
-                    DependencyWorkerHelper.create(this.sortedColumns, cameo),
-                    DependencyWorkerHelper.DEFAULT_NAME + "_" + id,
-                    DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
-
-    }
-
-    private Behavior<Message> handle(ValidateLocalCandidatesMessage message) {
-        this.getContext().getLog().info("Validating all local INDs");
-
-        this.initializeValidation();
-
-        // Initialize the task messages for this validation round
-        List<DependencyWorkerHelper.ValidateLocalTaskMessage> tasks = new ArrayList<>(this.dependencyWorkerHelpers.size());
-        for (int i = 0; i < this.dependencyWorkerHelpers.size(); i++)
-            tasks.add(new DependencyWorkerHelper.ValidateLocalTaskMessage(new IntArrayList(), new IntArrayList()));
-
-        // Form all pairs of local attributes and assign them to the helper's tasks in a round-robin fashion
-        int nextHelper = 0;
-        int[] attributes = this.sortedColumns.keySet().toArray(new int[0]);
-        for (int i = 0; i < attributes.length - 1; i++) {
-            for (int j = i + 1; j < attributes.length; j++) {
-                tasks.get(nextHelper).getAttributes1().add(attributes[i]);
-                tasks.get(nextHelper).getAttributes2().add(attributes[j]);
-                nextHelper = (nextHelper == tasks.size() - 1) ? 0 : nextHelper + 1;
-            }
-        }
-
-        // Send all validation tasks to the corresponding helpers
-        for (int i = 0; i < this.dependencyWorkerHelpers.size(); i++)
-            this.dependencyWorkerHelpers.get(i).tell(tasks.get(i));
-
         return this;
     }
 
-    private Behavior<Message> handle(ShareForValidationMessage message) {
-        this.initializeValidation();
-
-        // Send the local column to the remote worker for IND candidate validation
-        LargeMessageProxy.LargeMessage validateCandidatesMessage = new ValidateCandidatesMessage(
-                message.getAttribute(), this.sortedColumns.get(message.getAttribute()), message.getUntestedAttributes(), message.getToWorkerId());
-        this.largeMessageProxy.tell(new LargeMessageProxy.SendMessage(validateCandidatesMessage, message.getToWorkerLMP()));
+    private Behavior<Message> onNoWork(NoWorkMessage msg) {
+        // no more tasks; worker stays alive
         return this;
     }
 
-    private Behavior<Message> handle(ValidateCandidatesMessage message) {
-        this.getContext().getLog().info("Validating " + message.getUntestedAttributes().length + " INDs");
+    /**
+     * Validates lhs ⊆ rhs in a memory-friendly way:
+     * - build a set of RHS values
+     * - check all LHS values are contained
+     * You can replace with sorted-distinct two-pointer if you already enforce sorting.
+     */
+    private boolean isSubsetDistinct(String[] lhs, String[] rhs) {
+        // Treat null as empty
+        if (lhs == null || lhs.length == 0) return true;
+        if (rhs == null || rhs.length == 0) return false;
 
-        this.initializeValidation();
+        // Build RHS set
+        Set<String> rhsSet = new ObjectOpenHashSet<>(rhs.length * 2);
+        for (String v : rhs) if (v != null) rhsSet.add(v);
 
-        // Initialize the task messages for this validation round
-        List<DependencyWorkerHelper.ValidateTaskMessage> tasks = new ArrayList<>(this.dependencyWorkerHelpers.size());
-        for (int i = 0; i < this.dependencyWorkerHelpers.size(); i++)
-            tasks.add(new DependencyWorkerHelper.ValidateTaskMessage(message.getAttribute(), message.getColumn(), new IntArrayList()));
-
-        // Assign untested local columns to the helper's tasks in a round-robin fashion
-        int nextHelper = 0;
-        for (int localAttribute : message.getUntestedAttributes()) {
-            tasks.get(nextHelper).getLocalAttributes().add(localAttribute);
-            nextHelper = (nextHelper == tasks.size() - 1) ? 0 : nextHelper + 1;
+        for (String v : lhs) {
+            if (v == null) continue;
+            if (!rhsSet.contains(v)) return false;
         }
-
-        // Send all validation tasks to the corresponding helpers
-        for (int i = 0; i < this.dependencyWorkerHelpers.size(); i++)
-            this.dependencyWorkerHelpers.get(i).tell(tasks.get(i));
-
-        return this;
-    }
-    private Behavior<Message> handle(ShutdownMessage message) {
-        this.getContext().getLog().info("DependencyWorker shutting down cleanly.");
-        return Behaviors.stopped();
+        return true;
     }
 }

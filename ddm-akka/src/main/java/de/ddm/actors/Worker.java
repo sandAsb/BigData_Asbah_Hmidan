@@ -2,74 +2,55 @@ package de.ddm.actors;
 
 import akka.actor.typed.ActorRef;
 import akka.actor.typed.Behavior;
-import akka.actor.typed.DispatcherSelector;
-import akka.actor.typed.javadsl.*;
-import de.ddm.actors.patterns.Reaper;
+import akka.actor.typed.javadsl.AbstractBehavior;
+import akka.actor.typed.javadsl.ActorContext;
+import akka.actor.typed.javadsl.Behaviors;
+import akka.actor.typed.javadsl.Receive;
+import de.ddm.actors.profiling.DataProvider;
 import de.ddm.actors.profiling.DependencyWorker;
 import de.ddm.serialization.AkkaSerializable;
 import de.ddm.singletons.SystemConfigurationSingleton;
-import lombok.NoArgsConstructor;
 
 import java.util.ArrayList;
 import java.util.List;
 
 public class Worker extends AbstractBehavior<Worker.Message> {
 
-	////////////////////
-	// Actor Messages //
-	////////////////////
-	public interface Message extends AkkaSerializable { }
+    public static final String DEFAULT_NAME = "worker";
+    public interface Message extends AkkaSerializable {}
 
-	@NoArgsConstructor
-	public static class ShutdownMessage implements Message {
-		private static final long serialVersionUID = 7516129288777469221L;
-	}
+    public static final class ShutdownMessage implements Message {}
 
-	////////////////////////
-	// Actor Construction //
-	////////////////////////
+    public static Behavior<Message> create() {
+        return Behaviors.setup(Worker::new);
+    }
 
-	public static final String DEFAULT_NAME = "worker";
+    private final ActorRef<DataProvider.Message> provider;
+    private final List<ActorRef<DependencyWorker.Message>> workers;
 
-	public static Behavior<Message> create() {
-		return Behaviors.setup(Worker::new);
-	}
+    private Worker(ActorContext<Message> ctx) {
+        super(ctx);
 
-	private Worker(ActorContext<Message> context) {
-		super(context);
+        provider = ctx.spawn(DataProvider.create(), "dataProvider");
 
-		Reaper.watchWithDefaultReaper(context.getSelf());
+        int n = Math.max(1, SystemConfigurationSingleton.get().getNumWorkers());
+        workers = new ArrayList<>(n);
 
-		int numWorkers = SystemConfigurationSingleton.get().getNumWorkers();
-		this.workers = new ArrayList<>(numWorkers);
+        for (int i = 0; i < n; i++) {
+            workers.add(ctx.spawn(
+                    DependencyWorker.create(provider),
+                    "dependencyWorker-" + i
+            ));
+        }
+    }
 
-		for (int i = 0; i < numWorkers; i++)
-			workers.add(context.spawn(
-					DependencyWorker.create(),
-					DependencyWorker.DEFAULT_NAME + "_" + i,
-					DispatcherSelector.fromConfig("akka.worker-pool-dispatcher")));
-	}
-
-	///////////////////
-	// Actor State //
-	///////////////////
-
-	private final List<ActorRef<DependencyWorker.Message>> workers; // more than one
-
-	//////////////////////
-	// Actor Behavior //
-	//////////////////////
-	@Override
-	public Receive<Message> createReceive() {
-		return newReceiveBuilder()
-				.onMessage(ShutdownMessage.class, this::handle)
-				.build();
-	}
-
-	private Behavior<Message> handle(ShutdownMessage msg) {
-		for (ActorRef<DependencyWorker.Message> w : workers)
-			w.tell(new DependencyWorker.ShutdownMessage());
-
-		return this; // Reaper handles termination
-	}
+    @Override
+    public Receive<Message> createReceive() {
+        return newReceiveBuilder()
+                .onMessage(ShutdownMessage.class, msg -> {
+                    workers.forEach(w -> w.tell(new DependencyWorker.ShutdownMessage()));
+                    return Behaviors.stopped();
+                })
+                .build();
+    }
 }

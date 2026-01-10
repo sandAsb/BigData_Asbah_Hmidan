@@ -26,7 +26,8 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
     // Actor Messages //
     ////////////////////
 
-    public interface Message extends AkkaSerializable { }
+    public interface Message extends AkkaSerializable {
+    }
 
     @Getter
     @NoArgsConstructor
@@ -78,7 +79,8 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
     // Actor Behavior //
     ////////////////////
 
-    public static class ShutdownMessage implements Message { }
+    public static class ShutdownMessage implements Message {
+    }
 
     @Override
     public Receive<Message> createReceive() {
@@ -104,10 +106,10 @@ public class InputReader extends AbstractBehavior<InputReader.Message> {
                 break;
             batch.add(line);
         }
-
-        message.getReplyTo().tell(new DependencyMiner.BatchMessage(this.id, batch));
+        message.getReplyTo().tell(new DependencyMiner.BatchMessage(this.id, batch.toArray(new String[0][])));
         return this;
     }
+
 
     private Behavior<Message> handle(PostStop signal) throws IOException {
         this.reader.close();

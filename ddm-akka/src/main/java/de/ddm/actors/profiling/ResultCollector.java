@@ -22,92 +22,93 @@ import java.util.List;
 
 public class ResultCollector extends AbstractBehavior<ResultCollector.Message> {
 
-	////////////////////
-	// Actor Messages //
-	////////////////////
-	@NoArgsConstructor
-	public static class ShutdownMessage implements Message { }
+    ////////////////////
+    // Actor Messages //
+    ////////////////////
+    @NoArgsConstructor
+    public static class ShutdownMessage implements Message {
+    }
 
-	public interface Message extends AkkaSerializable {
-	}
+    public interface Message extends AkkaSerializable {
+    }
 
-	@Getter
-	@NoArgsConstructor
-	@AllArgsConstructor
-	public static class ResultMessage implements Message {
-		private static final long serialVersionUID = -7070569202900845736L;
-		List<InclusionDependency> inclusionDependencies;
-	}
+    @Getter
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ResultMessage implements Message {
+        private static final long serialVersionUID = -7070569202900845736L;
+        List<InclusionDependency> inclusionDependencies;
+    }
 
-	@NoArgsConstructor
-	public static class FinalizeMessage implements Message {
-		private static final long serialVersionUID = -6603856949941810321L;
-	}
+    @NoArgsConstructor
+    public static class FinalizeMessage implements Message {
+        private static final long serialVersionUID = -6603856949941810321L;
+    }
 
-	////////////////////////
-	// Actor Construction //
-	////////////////////////
+    ////////////////////////
+    // Actor Construction //
+    ////////////////////////
 
-	public static final String DEFAULT_NAME = "resultCollector";
+    public static final String DEFAULT_NAME = "resultCollector";
 
-	public static Behavior<Message> create() {
-		return Behaviors.setup(ResultCollector::new);
-	}
+    public static Behavior<Message> create() {
+        return Behaviors.setup(ResultCollector::new);
+    }
 
-	private ResultCollector(ActorContext<Message> context) throws IOException {
-		super(context);
+    private ResultCollector(ActorContext<Message> context) throws IOException {
+        super(context);
 
-		File file = new File(OutputConfigurationSingleton.get().getOutputFileName());
-		if (file.exists() && !file.delete())
-			throw new IOException("Could not delete existing result file: " + file.getName());
-		if (!file.createNewFile())
-			throw new IOException("Could not create result file: " + file.getName());
+        File file = new File(OutputConfigurationSingleton.get().getOutputFileName());
+        if (file.exists() && !file.delete())
+            throw new IOException("Could not delete existing result file: " + file.getName());
+        if (!file.createNewFile())
+            throw new IOException("Could not create result file: " + file.getName());
 
-		this.writer = new BufferedWriter(new FileWriter(file));
-	}
+        this.writer = new BufferedWriter(new FileWriter(file));
+    }
 
-	/////////////////
-	// Actor State //
-	/////////////////
+    /////////////////
+    // Actor State //
+    /////////////////
 
-	private final BufferedWriter writer;
+    private final BufferedWriter writer;
 
-	////////////////////
-	// Actor Behavior //
-	////////////////////
+    ////////////////////
+    // Actor Behavior //
+    ////////////////////
 
-	@Override
-	public Receive<Message> createReceive() {
-		return newReceiveBuilder()
-				.onMessage(ResultMessage.class, this::handle)
-				.onMessage(FinalizeMessage.class, this::handle)
-				.onMessage(ShutdownMessage.class, msg -> Behaviors.stopped())
-				.onSignal(PostStop.class, this::handle)
-				.build();
-	}
+    @Override
+    public Receive<Message> createReceive() {
+        return newReceiveBuilder()
+                .onMessage(ResultMessage.class, this::handle)
+                .onMessage(FinalizeMessage.class, this::handle)
+                .onMessage(ShutdownMessage.class, msg -> Behaviors.stopped())
+                .onSignal(PostStop.class, this::handle)
+                .build();
+    }
 
 
-	private Behavior<Message> handle(ResultMessage message) throws IOException {
+    private Behavior<Message> handle(ResultMessage message) throws IOException {
 //		this.getContext().getLog().info("Received {} INDs!", message.getInclusionDependencies().size());
 
-		for (InclusionDependency ind : message.getInclusionDependencies()) {
-			this.writer.write(ind.toString());
-			this.writer.newLine();
-		}
+        for (InclusionDependency ind : message.getInclusionDependencies()) {
+            this.writer.write(ind.toString());
+            this.writer.newLine();
+        }
 
-		return this;
-	}
+        return this;
+    }
 
-	private Behavior<Message> handle(FinalizeMessage message) throws IOException {
-		this.getContext().getLog().info("Received FinalizeMessage!");
+    private Behavior<Message> handle(FinalizeMessage message) throws IOException {
+        this.getContext().getLog().info("Received FinalizeMessage!");
 
-		this.writer.flush();
-		this.getContext().getSystem().unsafeUpcast().tell(new Guardian.ShutdownMessage());
-		return this;
-	}
+        this.writer.flush();
+        this.getContext().getSystem().unsafeUpcast().tell(new Guardian.ShutdownMessage());
+        return this;
+    }
 
-	private Behavior<Message> handle(PostStop signal) throws IOException {
-		this.writer.close();
-		return this;
-	}
+    private Behavior<Message> handle(PostStop signal) throws IOException {
+        this.writer.close();
+        return this;
+    }
 }

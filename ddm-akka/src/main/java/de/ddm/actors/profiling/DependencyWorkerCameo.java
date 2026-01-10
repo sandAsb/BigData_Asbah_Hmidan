@@ -4,95 +4,91 @@ import akka.actor.typed.ActorRef;
 import akka.actor.typed.Behavior;
 import akka.actor.typed.javadsl.*;
 import de.ddm.serialization.AkkaSerializable;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.BitSet;
 
 public class DependencyWorkerCameo extends AbstractBehavior<DependencyWorkerCameo.Message> {
 
-    ////////////////////
-    // Actor Messages //
-    ////////////////////
+    public interface Message extends AkkaSerializable {}
 
-    public interface Message extends AkkaSerializable { }
+    @Getter @NoArgsConstructor @AllArgsConstructor
+    public static class StartCameoMessage implements Message {
+        int expectedTasks;
+        ActorRef<DependencyMiner.Message> miner; // optional: where to forward aggregated results
+        int workerId;
+    }
 
-    @Getter
-    @NoArgsConstructor
-    @AllArgsConstructor
+    @Getter @NoArgsConstructor @AllArgsConstructor
     public static class PartialResultMessage implements Message {
-        private static final long serialVersionUID = 1L;
+        int taskId;
         int[] lhss;
         int[] rhss;
     }
 
-    //////////////////////////
-    // Actor Construction //
-    //////////////////////////
+    @Getter @NoArgsConstructor @AllArgsConstructor
+    public static class TaskDoneMessage implements Message {
+        int taskId;
+    }
+
+    @NoArgsConstructor
+    public static class ShutdownMessage implements Message {}
 
     public static final String DEFAULT_NAME = "dependencyWorkerCameo";
 
-    public static Behavior<Message> create(
-            ActorRef<DependencyMiner.Message> miner,
-            int numHelpers,
-            int workerId
-    ) {
-        return Behaviors.setup(ctx -> new DependencyWorkerCameo(ctx, miner, numHelpers, workerId));
+    public static Behavior<Message> create() {
+        return Behaviors.setup(DependencyWorkerCameo::new);
     }
 
-    private DependencyWorkerCameo(
-            ActorContext<Message> context,
-            ActorRef<DependencyMiner.Message> miner,
-            int numHelpers,
-            int workerId
-    ) {
-        super(context);
-        this.miner = miner;
-        this.remaining = numHelpers;
-        this.workerId = workerId;
+    private int expected = 0;
+    private int done = 0;
+    private final BitSet finished = new BitSet();
+    private ActorRef<DependencyMiner.Message> miner;
+    private int workerId = -1;
+
+    private DependencyWorkerCameo(ActorContext<Message> ctx) {
+        super(ctx);
     }
-
-    ///////////////////
-    // Actor State  //
-    ///////////////////
-
-    private final ActorRef<DependencyMiner.Message> miner;
-    private final int workerId;
-    private int remaining;
-
-    private final List<Integer> lhss = new ArrayList<>();
-    private final List<Integer> rhss = new ArrayList<>();
-
-    ////////////////////
-    // Actor Behavior //
-    ////////////////////
 
     @Override
     public Receive<Message> createReceive() {
         return newReceiveBuilder()
-                .onMessage(PartialResultMessage.class, this::handle)
+                .onMessage(StartCameoMessage.class, this::onStart)
+                .onMessage(PartialResultMessage.class, this::onPartial)
+                .onMessage(TaskDoneMessage.class, this::onDone)
+                .onMessage(ShutdownMessage.class, msg -> Behaviors.stopped())
                 .build();
     }
 
-    private Behavior<Message> handle(PartialResultMessage msg) {
-        for (int i = 0; i < msg.getLhss().length; i++) {
-            lhss.add(msg.getLhss()[i]);
-            rhss.add(msg.getRhss()[i]);
+    private Behavior<Message> onStart(StartCameoMessage msg) {
+        this.expected = msg.expectedTasks;
+        this.miner = msg.miner;
+        this.workerId = msg.workerId;
+        this.done = 0;
+        this.finished.clear();
+        return this;
+    }
+
+    private Behavior<Message> onPartial(PartialResultMessage msg) {
+        // If you still use helpers for local slices somewhere else,
+        // this is where you'd forward aggregated results.
+        // Example (if you re-introduce worker-side slicing):
+        //
+        // if (miner != null) miner.tell(new DependencyMiner.ResultMessage(msg.lhss, msg.rhss, workerId));
+        //
+        return this;
+    }
+
+    private Behavior<Message> onDone(TaskDoneMessage msg) {
+        if (!finished.get(msg.taskId)) {
+            finished.set(msg.taskId);
+            done++;
         }
 
-        remaining--;
-
-        if (remaining == 0) {
-            miner.tell(new DependencyMiner.ResultMessage(
-                    lhss.stream().mapToInt(i -> i).toArray(),
-                    rhss.stream().mapToInt(i -> i).toArray(),
-                    workerId
-            ));
+        if (done >= expected) {
+            // all tasks accounted for
             return Behaviors.stopped();
         }
-
         return this;
     }
 }
